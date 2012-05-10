@@ -6,10 +6,6 @@ use strict;
 use warnings;
 
 use Data::Dumper;
-
-$Data::Dumper::Sortkeys  = 1;
-$Data::Dumper::Quotekeys = 0;
-
 use IO::File;
 
 use constant FATAL => 0;
@@ -22,6 +18,8 @@ use constant TRACE => 5;
 my %LEVELS = ( 0 => 'FATAL', 1 => 'ERROR', 2 => 'WARN', 3 => 'INFO', 4 => 'DEBUG', 5 => 'TRACE' );
 
 use constant DEFAULT_LEVEL => 5;
+use constant DEFAULT_SORT_KEYS => 1;
+use constant DEFAULT_QUOTE_KEYS => 0;
 
 use constant DEFAULT_BASE_DIR => '/tmp';
 use constant MAX_FRAME => 10;
@@ -32,11 +30,11 @@ Log::AutoDump - Log with automatic dumping of references and objects.
 
 =head1 VERSION
 
-Version 0.03
+Version 0.08
 
 =cut
 
-our $VERSION = '0.03';
+our $VERSION = '0.08';
 
 $VERSION = eval $VERSION;
 
@@ -48,7 +46,7 @@ Logging as usual, but with automatic dumping of references and objects.
 
  my $log = Log::AutoDump->new;
     
- $log->msg( 4, "Logging at level 4", $ref, $hashref );
+ $log->msg( 4, "Logging at level 4 (debug)", $ref, $hashref );
 
  $log->warn( "Logging at warn level (2)", \@somelist, "Did you see that list?!" )
  
@@ -66,7 +64,7 @@ For example...
 
 If the B<level> for the C<$log> object is set lower than B<warn>, the above log statement will never make it to any log file, or database.
 
-But you have still C<Dumped> an entire data-structure, just in case.
+Unfortunately, you have still C<Dumped> an entire data-structure, just in case.
 
 We take the dumping process out of your hands.
 
@@ -97,14 +95,20 @@ This is useful when dealing with some references or objects that may contain thi
 
 Creates a new logger object.
 
- my $log = Log::AutoDump->new( level => 3, dumps => 1, dump_depth => 2 );
+ my $log = Log::AutoDump->new( level              => 3,
+                               dumps              => 1,
+                               dump_depth         => 2,
+                               sort_keys          => 1,
+                               quote_keys         => 0,
+                               filename_datestamp => 1,
+                             );
 
 =cut
 
 sub new
 {
 	my ( $class, %args ) = @_;
-	
+
 	if ( 1 )   # possibly use db backend later
 	{
 		my $path = $ENV{LOG_AUTODUMP_BASE_DIR} || $args{ base_dir } || DEFAULT_BASE_DIR;
@@ -113,18 +117,33 @@ sub new
 
 		my $filename = delete $args{filename} || $0;
 	
-		$filename =~ s/^.//;
+		$filename =~ s/^\.//;
 	
 		$filename =~ s/[\s\/]/-/g;
 
 		$filename =~ s/^-//;
 
+		if ( $args{ filename_datestamp } || $args{ datestamp_filename } )  # datestamp_filename can be removed after May 2012
+		{
+			my ( undef, undef, undef, $day, $mon, $year, undef, undef, undef ) = localtime( time );
+
+			$mon++;
+			$mon =~ s/^(\d)$/0$1/;
+			$day =~ s/^(\d)$/0$1/;
+		
+			my $datestamp = ( $year + 1900 ) . $mon . $day;
+			
+			$filename = $datestamp . '-' . $filename;
+		}
+		
 		$args{filename} = $path . $filename;
 	}
 		
-	my $self = {  level      => $args{ level } || DEFAULT_LEVEL,
-	              dumps      => $args{ dumps } || 1,
+	my $self = {  level      => exists $args{ level } ? $args{ level } : DEFAULT_LEVEL,
+	              dumps      => exists $args{ dumps } ? $args{ dumps } : 1,
 	              dump_depth => $args{ dump_depth } || 0,
+	              sort_keys  => exists $args{ sort_keys }  ? $args{ sort_keys }  : DEFAULT_SORT_KEYS,
+	              quote_keys => exists $args{ quote_keys } ? $args{ quote_keys } : DEFAULT_QUOTE_KEYS,
 	              filename   => $args{ filename },
 	             _fh         => undef,
 	           };
@@ -171,7 +190,7 @@ sub dumps
 
 =head3 dump_depth
 
-Set the C<$Data::Dumper::Maxdepth>.
+Sets C<$Data::Dumper::Maxdepth>.
 
  $log->dump_depth( 3 );
 
@@ -183,6 +202,37 @@ sub dump_depth
 	$self->{ dump_depth } = $arg if defined $arg;
 	return $self->{ dump_depth };
 }
+
+=head3 sort_keys
+
+Sets C<$Data::Dumper::Sortkeys>.
+
+ $log->sort_keys( 0 );
+
+=cut
+
+sub sort_keys
+{
+	my ( $self, $arg ) = @_;
+	$self->{ sort_keys } = $arg if defined $arg;
+	return $self->{ sort_keys };
+}
+
+=head3 quote_keys
+
+Sets C<$Data::Dumper::Quotekeys>.
+
+ $log->quote_keys( 0 );
+
+=cut
+
+sub quote_keys
+{
+	my ( $self, $arg ) = @_;
+	$self->{ quote_keys } = $arg if defined $arg;
+	return $self->{ quote_keys };
+}
+
 
 =head3 filename
 
@@ -227,7 +277,11 @@ sub msg
 {
 	my ( $self, $level, @things ) = @_;
 
-	$Data::Dumper::Maxdepth = $self->dump_depth;
+	local $Data::Dumper::Maxdepth = $self->dump_depth;
+	
+	local $Data::Dumper::Sortkeys = $self->sort_keys;
+
+	local $Data::Dumper::Quotekeys = $self->quote_keys;
 	
 	if ( $level !~ /^\d+$/ )
 	{
@@ -260,6 +314,8 @@ sub msg
 
 		$subroutine =~ s/::__ANON__$//;
 
+		$subroutine =~ s/^ModPerl::ROOT::ModPerl::Registry::(.*)$/$1/;
+		
 		last;
 	}
 	
@@ -269,9 +325,16 @@ sub msg
 	
 	my ( $sec, $min, $hour, $day, $mon, $year, undef, undef, undef ) = localtime( time );
 
-	my $datetime = ( $year + 1900 ) . '/' . ( $mon + 1 ) . '/' . $day . ' ' . $hour . ':' . $min . ':' . $sec;
+	$mon++;
+	$mon =~ s/^(\d)$/0$1/;
+	$day =~ s/^(\d)$/0$1/;
+	$hour =~ s/^(\d)$/0$1/;
+	$min =~ s/^(\d)$/0$1/;
+	$sec =~ s/^(\d)$/0$1/;
+	
+	my $datetime = ( $year + 1900 ) . '/' . $mon . '/' . $day . ' ' . $hour . ':' . $min . ':' . $sec;
                                                 
-	my $prefix = join( ' ', $datetime, $LEVELS{ $level }, $subroutine, '(' . $line . ')' ) . ' - ';
+	my $prefix = join( ' ', $datetime, $$, $LEVELS{ $level }, $subroutine, '(' . $line . ')' ) . ' - ';
 
 	my $msg = '';
 
@@ -338,7 +401,7 @@ sub msg
 				}
 				else
 				{
-					$msg .= $prefix . "<< NOT DUMPING OBJECT/REFERENCE [ " . $label . " ] >>";
+					$msg .= $prefix . "NOT DUMPING [ " . $label . " ]";
 				}
 #			}
 		}
